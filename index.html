@@ -439,8 +439,11 @@ code{background:rgba(0,212,255,0.07);padding:1px 5px;border-radius:4px;
     <div class="irow">
       <textarea class="ibox" id="inp" placeholder="Awaiting your command..." rows="1"
         onkeydown="hkey(event)" oninput="arz(this)"></textarea>
-      <button class="sbtn" id="sbtn" onclick="send()">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <button class="sbtn" id="sbtn"
+        onclick="handleSbtnClick()"
+        onmousedown="handleSbtnDown(event)" onmouseup="handleSbtnUp(event)"
+        ontouchstart="handleSbtnDown(event)" ontouchend="handleSbtnUp(event)">
+        <svg id="sbtn-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
         </svg>
       </button>
@@ -549,6 +552,98 @@ function toggleJ(){
   else { stopVoice(); toast('JARVIS MODE STANDBY'); }
 }
 
+// PTT state
+let pttActive = false;
+let pttTranscript = '';
+
+function setSbtnMicIcon(){
+  document.getElementById('sbtn-icon').innerHTML =
+    '<circle cx="12" cy="11" r="4" fill="currentColor"/><path d="M19 11a7 7 0 0 1-14 0" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/><line x1="12" y1="18" x2="12" y2="22" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>';
+}
+function setSbtnSendIcon(){
+  document.getElementById('sbtn-icon').innerHTML =
+    '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>';
+}
+
+function handleSbtnClick(){
+  // In normal mode this fires — send text as usual
+  if(!jmode) send();
+}
+
+function handleSbtnDown(e){
+  if(!jmode) return;
+  e.preventDefault();
+  if(pttActive) return;
+  // Stop JARVIS speaking immediately
+  window.speechSynthesis && window.speechSynthesis.cancel();
+  ttsQueue=[]; ttsBusy=false;
+  pttActive = true;
+  pttTranscript = '';
+  document.getElementById('inp').value = '';
+  document.getElementById('inp').placeholder = '🎙 Listening...';
+  document.getElementById('sbtn').style.borderColor = 'var(--gold)';
+  document.getElementById('sbtn').style.background = 'rgba(255,200,87,0.15)';
+  document.getElementById('sbtn').style.color = 'var(--gold)';
+  updateBanner(true);
+  startPTT();
+}
+
+function handleSbtnUp(e){
+  if(!jmode || !pttActive) return;
+  e.preventDefault();
+  pttActive = false;
+  document.getElementById('inp').placeholder = 'Awaiting your command...';
+  document.getElementById('sbtn').style.borderColor = '';
+  document.getElementById('sbtn').style.background = '';
+  document.getElementById('sbtn').style.color = '';
+  updateBanner(false);
+  stopPTT();
+}
+
+function startPTT(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){ toast('VOICE NOT SUPPORTED'); return; }
+  if(recog){ try{ recog.abort(); }catch(e){} recog=null; }
+  recog = new SR();
+  recog.continuous = true;
+  recog.interimResults = true;
+  recog.maxAlternatives = 3;
+  recog.lang = 'en-US';
+  recog.onresult = (e) => {
+    let interim='', final='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      let best=e.results[i][0];
+      for(let j=1;j<e.results[i].length;j++){
+        if(e.results[i][j].confidence>best.confidence) best=e.results[i][j];
+      }
+      if(e.results[i].isFinal) final+=best.transcript;
+      else interim+=best.transcript;
+    }
+    const live = (final||interim).trim();
+    if(live){ setInp(live); pttTranscript=live; }
+  };
+  recog.onerror=(e)=>{
+    if(e.error==='no-speech'||e.error==='aborted') return;
+    toast('MIC ERROR: '+e.error.toUpperCase());
+  };
+  recog.onend=()=>{ jlistening=false; };
+  recog.onstart=()=>{ jlistening=true; };
+  try{ recog.start(); } catch(e){ toast('MIC ACCESS DENIED'); }
+}
+
+function stopPTT(){
+  jlistening=false;
+  if(recog){ try{ recog.stop(); }catch(e){} }
+  // Give 300ms for final result to come in, then send
+  setTimeout(()=>{
+    if(recog){ try{ recog.abort(); }catch(e){} recog=null; }
+    const txt = pttTranscript.trim() || document.getElementById('inp').value.trim();
+    if(txt){ sendVoice(txt); }
+    else { toast('NO SPEECH DETECTED'); }
+    pttTranscript='';
+  }, 300);
+}
+
 function startVoice(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SR){
@@ -559,67 +654,33 @@ function startVoice(){
     document.getElementById('jlabel').textContent='JARVIS MODE';
     return;
   }
-  speak('JARVIS online. All systems engaged. Awaiting your command.');
-  recog = new SR();
-  recog.continuous = true;
-  recog.interimResults = true;   // show live transcript as you speak
-  recog.maxAlternatives = 3;     // consider top 3 interpretations, pick best
-  recog.lang = 'en-US';
-
-  let finalTimer = null;
-  let lastInterim = '';
-
-  recog.onstart = () => { jlistening=true; updateBanner(true); };
-  recog.onend = () => {
-    jlistening=false;
-    if(jmode){ try{ recog.start(); }catch(e){} }
-  };
-  recog.onerror = (e) => {
-    if(e.error==='no-speech'||e.error==='aborted') return;
-    toast('MIC ERROR: '+e.error.toUpperCase());
-  };
-  recog.onresult = (e) => {
-    let interim = '';
-    let final = '';
-    for(let i = e.resultIndex; i < e.results.length; i++){
-      // Pick the alternative with highest confidence
-      let best = e.results[i][0];
-      for(let j=1; j<e.results[i].length; j++){
-        if(e.results[i][j].confidence > best.confidence) best = e.results[i][j];
-      }
-      if(e.results[i].isFinal){ final += best.transcript; }
-      else { interim += best.transcript; }
-    }
-
-    // Show live interim in input box
-    if(interim){ setInp(interim); lastInterim = interim; }
-
-    if(final){
-      const txt = final.trim();
-      if(!txt) return;
-      clearTimeout(finalTimer);
-      setInp(txt);
-      // Small delay so recognition can catch any trailing words
-      finalTimer = setTimeout(()=>{ sendVoice(txt); }, 400);
-    }
-  };
-  try{ recog.start(); toast('JARVIS MODE ACTIVATED · LISTENING'); }
-  catch(e){ toast('MIC ACCESS DENIED — ALLOW MICROPHONE'); }
+  // Switch send button to mic icon
+  setSbtnMicIcon();
+  document.getElementById('inp').placeholder = 'Hold send button to speak...';
+  speak('JARVIS online. Push to talk activated. Hold the send button to speak.');
+  toast('JARVIS MODE · HOLD SEND TO SPEAK');
 }
 
 function stopVoice(){
   jlistening=false;
+  pttActive=false;
   if(recog){ try{ recog.abort(); }catch(e){} recog=null; }
   window.speechSynthesis && window.speechSynthesis.cancel();
   ttsQueue=[]; ttsBusy=false;
+  // Restore send button
+  setSbtnSendIcon();
+  document.getElementById('inp').placeholder = 'Awaiting your command...';
+  document.getElementById('sbtn').style.borderColor='';
+  document.getElementById('sbtn').style.background='';
+  document.getElementById('sbtn').style.color='';
   updateBanner(false);
 }
 
 function updateBanner(on){
   const b = document.getElementById('jbanner');
   b.innerHTML = on
-    ? '<div class="jpulse"></div> JARVIS MODE ACTIVE · LISTENING · CLAUDE NEURAL CORE ONLINE'
-    : '<div class="jpulse"></div> JARVIS MODE ACTIVE · ALL SYSTEMS ENGAGED · CLAUDE NEURAL CORE ONLINE';
+    ? '<div class="jpulse"></div> JARVIS MODE · LISTENING NOW · RELEASE TO SEND'
+    : '<div class="jpulse"></div> JARVIS MODE ACTIVE · HOLD SEND BUTTON TO SPEAK';
 }
 
 async function sendVoice(txt){
@@ -631,8 +692,6 @@ async function sendVoice(txt){
   busy=true;
   document.getElementById('sbtn').disabled=true;
   const tk=showThinking();
-  // Pause recognition while processing
-  if(recog&&jlistening){ try{ recog.abort(); }catch(e){} }
   try{
     await doClaudeVoice(txt);
   } catch(err){
@@ -643,8 +702,6 @@ async function sendVoice(txt){
   } finally {
     busy=false;
     document.getElementById('sbtn').disabled=false;
-    // Resume listening after response
-    if(jmode&&recog){ try{ recog.start(); }catch(e){} }
   }
 }
 
